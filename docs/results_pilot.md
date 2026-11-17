@@ -35,3 +35,37 @@ Error = mean absolute error in packets against the true cwnd at each transmissio
 The sender only ever sends bulk data and is nearly always window-limited. Other capture points
 (after the bottleneck, at the receiver) will be harder and are not tested. Thirty runs cannot
 support claims about how this changes across the grid.
+
+---
+
+# Pilot result 2: classifying the sender's phase from a trace (same 30 runs)
+
+True phase mix over 37,487 packets: slow start 5.0%, avoidance 86.3%, recovery 8.7%.
+Because avoidance dominates, **macro-F1** (average of the three phases' F1) is the honest score;
+plain accuracy rewards guessing the majority.
+
+| classifier | accuracy | macro-F1 | slow start F1 | avoidance F1 | recovery F1 |
+|---|---:|---:|---:|---:|---:|
+| always "avoidance" | 0.863 | 0.309 | 0.000 | 0.926 | 0.000 |
+| first loss rule | 0.881 | 0.783 | 0.434 | 0.927 | 0.988 |
+| growth rule | 0.975 | 0.923 | 0.793 | 0.987 | 0.988 |
+
+Recovery rule (both non-trivial classifiers): enter at the third duplicate ACK, leave when an ACK
+passes the highest packet sent at that moment. Growth rule: outside recovery, "slow start" if at
+least 1.5 new packets left per ACK over the last 6 ACKs.
+
+## Where the growth rule is wrong
+
+- 797 of its 832 "avoidance called slow start" errors are within 30 packets of the sender
+  entering avoidance: the observer needs a few ACKs to notice the growth has slowed.
+- All 79 "slow start called recovery" errors are packets resent after a timeout. The observer
+  sees no third duplicate ACK, so its recovery state machine and the sender's timeout path
+  disagree. A timeout detector would fix this.
+
+## Read this with care
+
+- These rules copy how this sender behaves (one packet per ACK, three duplicate ACKs, a known
+  recovery rule). Near-perfect recovery recall shows the labels are consistent and the task is
+  learnable on this sender. It does **not** show the method works on Linux TCP, which uses SACK,
+  different recovery and pacing. A second sender is needed before any claim beyond this one.
+- Single capture point (next to the sender), 30 runs, a hand-written rule, no learning.
