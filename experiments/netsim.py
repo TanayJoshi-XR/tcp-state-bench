@@ -84,18 +84,78 @@ class Link:
                     self._cv.wait(due - now)
                     continue
                 _, _, sock, data, addr, meta = heapq.heappop(self._heap)
+                sent_ok = True
                 try:
                     sock.sendto(data, addr)
                 except OSError:
-                    pass
+                    sent_ok = False
                 self.stats["delivered"] += 1
                 if meta is not None:
-                    self.tap.delivered(meta, time.time())
+                    if sent_ok:
+                        self.tap.delivered(meta, time.time())
+                    else:
+                        self.tap.undelivered(meta)   # socket already closed: never reached the OS
 
     def close(self):
         with self._cv:
             self._closed = True
             self._cv.notify()
+
+
+class CrossTraffic:
+    """Unresponsive background load injected into a Link (it never slows down).
+
+    Packets carry flag byte 0x80, so receivers ignore them; they only occupy queue space
+    and bottleneck time. rate_bps is the rate while ON. With on_s/off_s the source sends
+    in bursts (on for on_s seconds, silent for off_s), starting at a random phase (seed).
+    """
+    FLAG = 0x80
+
+    def __init__(self, link, rate_bps, on_s=None, off_s=None, seed=0, pkt_bytes=1041):
+        self.link, self.pkt_bytes = link, pkt_bytes
+        self.interval = pkt_bytes * 8.0 / rate_bps
+        self.on_s, self.off_s = on_s, off_s
+        self.phase = random.Random(seed).random() * ((on_s + off_s) if on_s else 0.0)
+        self.src = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sink.bind(("127.0.0.1", 0))
+        self.addr = self.sink.getsockname()
+        self.sent = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._t0 = time.time()
+        self._thread.start()
+
+    def _is_on(self, now):
+        if not self.on_s:
+            return True
+        return ((now - self._t0 + self.phase) % (self.on_s + self.off_s)) < self.on_s
+
+    def _run(self):
+        nxt = time.time()
+        pad = b"\0" * (self.pkt_bytes - 5)
+        while not self._stop.is_set():
+            now = time.time()
+            if self._is_on(now):
+                self.link.send(self.src, struct.pack("!BI", self.FLAG, self.sent) + pad, self.addr)
+                self.sent += 1
+            nxt += self.interval
+            delay = nxt - time.time()
+            if delay > 0:
+                self._stop.wait(delay)
+            else:
+                nxt = time.time()            # fell behind: do not burst to catch up
+
+    def stop(self):
+        """Stop generating. Sockets stay open so packets still in the link can be delivered."""
+        self._stop.set()
+        self._thread.join(timeout=1)
+
+    def close(self):
+        self.src.close()
+        self.sink.close()
 
 
 class NetChannel:
@@ -127,7 +187,7 @@ def bdp_packets(rate_bps, rtt, pkt_bytes=1041):
 
 def run_flows(n_flows=1, size=1_000_000, rate_bps=4e6, delay=0.02, queue_pkts=30,
               make_cc=None, loss=0.0, send_kw=None, recv_kw=None, stagger=0.0,
-              label=False, seed=None):
+              label=False, seed=None, cross=None):
     """Run n_flows transfers that share ONE bottleneck. Verifies every file arrives intact.
 
     label=True also records ground truth (sender state per packet, the fate of every
@@ -175,13 +235,20 @@ def run_flows(n_flows=1, size=1_000_000, rate_bps=4e6, delay=0.02, queue_pkts=30
     rthreads = [threading.Thread(target=recv_worker, args=(f,), daemon=True) for f in flows]
     sthreads = [threading.Thread(target=send_worker, args=(f, i), daemon=True)
                 for i, f in enumerate(flows)]
+    xt = CrossTraffic(fwd, **cross) if cross else None
+    if xt:
+        xt.start()
     for t in rthreads + sthreads:
         t.start()
     for t in sthreads:
         t.join()
+    if xt:
+        xt.stop()
     for t in rthreads:
         t.join(timeout=10)
     time.sleep(0.1)
+    if xt:
+        xt.close()
     fwd.close()
     rev.close()
     for f in flows:
@@ -199,6 +266,8 @@ def run_flows(n_flows=1, size=1_000_000, rate_bps=4e6, delay=0.02, queue_pkts=30
         out.append(st)
     res = {"flows": out, "link": fwd.stats, "queue_log": fwd.queue_log,
            "drop_log": fwd.drop_log, "link_t0": fwd.t0}
+    if xt:
+        res["cross"] = {"sent": xt.sent, "config": dict(cross)}
     if label:
         res["label"] = {"tap": fwd.tap, "flows": [
             {"addr": f["addr"], "trace": f["trace"], "rx_log": f["rx_log"]} for f in flows]}

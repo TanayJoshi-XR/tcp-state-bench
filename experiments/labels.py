@@ -75,7 +75,8 @@ class PacketTap:
 
     queue_seen = number of packets in the system (queued or being sent) when this
     packet arrived, BEFORE it was added.  fate is 'delivered', 'drop_queue' (buffer
-    full) or 'drop_random' (the extra random-loss model).
+    full) or 'drop_random' (the extra random-loss model); 'lost_at_teardown' marks a packet the
+    link could not hand to the OS because the experiment had already ended.
     t_depart_model   = when the last bit leaves the bottleneck (model time)
     t_deliver_model  = t_depart + propagation delay (when the link should deliver it)
     t_deliver_actual = when the link thread really handed it to the OS
@@ -89,16 +90,24 @@ class PacketTap:
         if len(data) < 5:
             return None
         flags, seq = struct.unpack_from("!BI", data)
-        if flags != 0:            # SYN / ACK / FIN: not a data packet
-            return None
-        n = self._nth.get((addr, seq), 0) + 1
-        self._nth[(addr, seq)] = n
+        if flags == 0x80:         # background cross-traffic packet (see netsim.CrossTraffic)
+            addr, n = "cross", 1
+        elif flags != 0:          # SYN / ACK / FIN: control packet; the row stores the flags byte
+            addr, seq = "control", flags
+            n = self._nth.get(("control", None), 0) + 1
+            self._nth[("control", None)] = n
+        else:
+            n = self._nth.get((addr, seq), 0) + 1
+            self._nth[(addr, seq)] = n
         row = [seq, n, now, qlen, fate, t_depart, t_deliver, None]
         self.rows.setdefault(addr, []).append(row)
         return row
 
     def delivered(self, row, t):
         row[7] = t
+
+    def undelivered(self, row):
+        row[4] = "lost_at_teardown"     # the link tried to deliver it after its socket was closed
 
     def write(self, addr, outdir, prefix):
         with open(os.path.join(outdir, f"{prefix}_link.csv"), "w", newline="") as f:

@@ -13,5 +13,4 @@ unreleased labelled traces (plan: email them before writing).
 
 **Baseline to beat:** Wireshark already computes `tcp.analysis.bytes_in_flight` for real TCP.
 
-**Next:** cross-traffic and multiple flows; batches of the run grid; first baseline task
-(estimate cwnd from the trace, score against these labels).
+**Next:** batches of the run grid; first baseline task (estimate cwnd from the trace, score against these labels).

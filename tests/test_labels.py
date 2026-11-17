@@ -11,16 +11,16 @@ from protocol.congestion import Reno
 def test_labelled_run_is_consistent():
     with tempfile.TemporaryDirectory() as d:
         m = run("reno", 200_000, 4e6, 0.02, 30, 0.02, 3, d, prefix="t")
-        c = m["checks"]
+        c, g = m["flows"][0]["checks"], m["global_checks"]
         assert c["tx_link_exact_match"], c
         assert c["delivered_without_rx"] == 0, c
         assert c["sends_violating_window_label"] == 0, c
-        assert c["drop_queue"] == c["link_stats_dropped_queue"], c
-        assert c["drop_random"] == c["link_stats_dropped_random"], c
+        assert g["queue_drops_account_for_link_stats"], g
+        assert g["link_stats_dropped_random"] == c["drop_random"], (g, c)
         assert c["queue_seen_within_buffer"], c
-        rows = list(csv.DictReader(open(os.path.join(d, "t_joined.csv"))))
+        rows = list(csv.DictReader(open(os.path.join(d, "t_f0_joined.csv"))))
         firsts = [r for r in rows if r["nth"] == "1"]
-        assert sorted(int(r["seq"]) for r in firsts) == list(range(m["sender_stats"]["packets"]))
+        assert sorted(int(r["seq"]) for r in firsts) == list(range(m["flows"][0]["sender_stats"]["packets"]))
     print("ok  labelled Reno run: every packet accounted for, labels consistent with the window rule")
 
 
@@ -41,8 +41,24 @@ def test_labels_do_not_change_behaviour_counts():
     print("ok  logging on/off gives the same retransmit counts for the same seed")
 
 
+def test_two_flows_with_cross_traffic_reconcile():
+    with tempfile.TemporaryDirectory() as d:
+        cross = {"rate_bps": 1.5e6, "on_s": 0.3, "off_s": 0.3, "seed": 4}
+        m = run("cubic", 150_000, 4e6, 0.02, 30, 0.005, 4, d, prefix="m", n_flows=2,
+                stagger=0.2, cross=cross)
+        g = m["global_checks"]
+        assert g["queue_drops_account_for_link_stats"], g      # every queue drop has a row
+        assert g["cross_every_packet_recorded"] and g["cross_packets_sent"] > 0, g
+        for f in m["flows"]:
+            c = f["checks"]
+            assert c["tx_link_exact_match"] and c["delivered_without_rx"] == 0, c
+            assert c["sends_violating_window_label"] == 0, c
+    print("ok  2 flows + bursty cross-traffic: every packet (data, control, cross) has a fate row")
+
+
 if __name__ == "__main__":
     test_labelled_run_is_consistent()
     test_fixed_window_run_is_labelled()
     test_labels_do_not_change_behaviour_counts()
+    test_two_flows_with_cross_traffic_reconcile()
     print("\nALL LABEL CHECKS PASSED")
